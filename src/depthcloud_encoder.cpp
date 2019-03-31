@@ -56,16 +56,12 @@ namespace depthcloud
 using namespace message_filters::sync_policies;
 namespace enc = sensor_msgs::image_encodings;
 
-static int target_resolution_ = 512;
-static float max_depth_per_tile = 1.0;
-
 DepthCloudEncoder::DepthCloudEncoder(ros::NodeHandle& nh, ros::NodeHandle& pnh) :
     nh_(nh),
     pnh_(pnh),
     depth_sub_(),
     color_sub_(),
     pub_it_(nh_),
-    crop_size_(target_resolution_),
     connectivityExceptionFlag(false),
     lookupExceptionFlag(false)
 {
@@ -78,11 +74,23 @@ DepthCloudEncoder::DepthCloudEncoder(ros::NodeHandle& nh, ros::NodeHandle& pnh) 
   // read point cloud topic from param server
   priv_nh_.param<std::string>("cloud", cloud_topic_, "");
 
+  // read camera info topic from param server.
+  priv_nh_.param<std::string>("camera_info_topic", camera_info_topic_, "");
+
   // The original frame id of the camera that captured this cloud
   priv_nh_.param<std::string>("camera_frame_id", camera_frame_id_, "/camera_rgb_optical_frame");
 
   // read focal length value from param server in case a cloud topic is used.
   priv_nh_.param<double>("f", f_, 525.0);
+
+  // read focal length multiplication factor value from param server in case a cloud topic is used.
+  priv_nh_.param<double>("f_mult_factor", f_mult_factor_, 1.0);
+
+  // read max depth per tile from param server
+  priv_nh_.param<float>("max_depth_per_tile", max_depth_per_tile_, 1.0);
+
+  // read target resolution from param server.
+  priv_nh_.param<int>("target_resolution", crop_size_, 512);
 
   // read depth map topic from param server
   priv_nh_.param<std::string>("depth", depthmap_topic_, "/camera/depth/image");
@@ -90,12 +98,15 @@ DepthCloudEncoder::DepthCloudEncoder(ros::NodeHandle& nh, ros::NodeHandle& pnh) 
   // read rgb topic from param server
   priv_nh_.param<std::string>("rgb", rgb_image_topic_, "/camera/rgb/image_color");
 
+  // Whether the encoded topic should be latched.
+  priv_nh_.param<bool>("latch", latch_, false);
+
   // Monitor whether anyone is subscribed to the output
   image_transport::SubscriberStatusCallback connect_cb = boost::bind(&DepthCloudEncoder::connectCb, this);
   // Make sure we don't enter connectCb() between advertising and assigning to pub_point_cloud_
   boost::lock_guard<boost::mutex> lock(connect_mutex_);
 
-  pub_ = pub_it_.advertise("depthcloud_encoded", 1, connect_cb, connect_cb);
+  pub_ = pub_it_.advertise("depthcloud_encoded", 1, connect_cb, connect_cb, ros::VoidPtr(), latch_);
 }
 DepthCloudEncoder::~DepthCloudEncoder()
 {
@@ -113,8 +124,8 @@ void DepthCloudEncoder::connectCb()
       subscribeCloud(cloud_topic_);
     else {
       if ( depth_source_ != "depthmap" && depth_source_ != "cloud" ) {
-	  ROS_ERROR("Invalid depth_source given to DepthCloudEncoder: use 'depthmap' or 'cloud'.");
-	  return;
+        ROS_ERROR("Invalid depth_source given to DepthCloudEncoder: use 'depthmap' or 'cloud'.");
+        return;
       }
       ROS_ERROR_STREAM("Empty topic provided for DepthCloudEncoder depth_source " << depth_source_ << ". Check your arguments.");
     }
@@ -125,6 +136,22 @@ void DepthCloudEncoder::connectCb()
   }
 }
 
+void DepthCloudEncoder::cameraInfoCb(const sensor_msgs::CameraInfoConstPtr& cam_info_msg)
+{
+  if (cam_info_msg) {
+    // Update focal length value.
+    const double fx = f_mult_factor_ * cam_info_msg->K[0];
+    const double fy = f_mult_factor_ * cam_info_msg->K[4];
+    f_ = (fx + fy) / 2;
+  }
+}
+
+void DepthCloudEncoder::dynReconfCb(depthcloud_encoder::paramsConfig& config, uint32_t level)
+{
+  max_depth_per_tile_ = config.max_depth_per_tile;
+  f_mult_factor_ = config.f_mult_factor;
+}
+
 void DepthCloudEncoder::subscribeCloud(std::string& cloud_topic)
 {
   unsubscribe();
@@ -133,6 +160,9 @@ void DepthCloudEncoder::subscribeCloud(std::string& cloud_topic)
 
   // subscribe to depth cloud topic
   cloud_sub_ = nh_.subscribe(cloud_topic, 1, &DepthCloudEncoder::cloudCB, this );
+  if (!camera_info_topic_.empty()) {
+    camera_info_sub_ = nh_.subscribe(camera_info_topic_, 2, &DepthCloudEncoder::cameraInfoCb, this);
+  }
 }
 
 void DepthCloudEncoder::subscribe(std::string& depth_topic, std::string& color_topic)
@@ -182,6 +212,7 @@ void DepthCloudEncoder::unsubscribe()
   {
     // reset all message filters
     cloud_sub_.shutdown();
+    camera_info_sub_.shutdown();
     sync_depth_color_.reset(new SynchronizerDepthColor(SyncPolicyDepthColor(10)));
     depth_sub_.reset(new image_transport::SubscriberFilter());
     color_sub_.reset(new image_transport::SubscriberFilter());
@@ -210,18 +241,22 @@ void DepthCloudEncoder::cloudCB(const sensor_msgs::PointCloud2& cloud_msg)
      is_bigendian: 0
      step: 1920
   */
-  color_msg->height = depth_msg->height = 480;
-  color_msg->width  = depth_msg->width  = 640;
+
+  color_msg->height = depth_msg->height = cloud_msg.height;
+  color_msg->width  = depth_msg->width  = cloud_msg.width;
   depth_msg->encoding = "32FC1";
   color_msg->encoding = "rgb8";
   color_msg->is_bigendian = depth_msg->is_bigendian = 0;
   depth_msg->step = depth_msg->width * 4;
   color_msg->step = color_msg->width * 3;
-  depth_msg->data.resize( depth_msg->height * depth_msg->step ); // 480 rows of 2560 bytes.
-  color_msg->data.resize( color_msg->height * color_msg->step, 0 ); // 480 rows of 1920 bytes.
-  for( int j=0; j < depth_msg->height; ++j ) {
-    for( int i =0; i < depth_msg->width; ++i ) {
-      *(float*)&depth_msg->data[ j*640*4 + i*4] = std::numeric_limits<float>::quiet_NaN();
+  // 480 (default) rows of 2560 bytes.
+  depth_msg->data.resize(depth_msg->height * depth_msg->step);
+  // 480 (default) rows of 1920 bytes.
+  color_msg->data.resize(color_msg->height * color_msg->step, 0);
+  for (int j=0; j < depth_msg->height; ++j) {
+    for (int i =0; i < depth_msg->width; ++i) {
+      *(float*)&depth_msg->data[ j * cloud_msg.width * 4 + i * 4 ] =
+          std::numeric_limits<float>::quiet_NaN();
     }
   }
 
@@ -262,7 +297,7 @@ void DepthCloudEncoder::cloudToDepth(const sensor_msgs::PointCloud2& cloud_msg, 
       // ros::Time(0) can cause unexpected frames?
       tf_listener_.waitForTransform( this->camera_frame_id_, cloud_msg.header.frame_id,
 				    ros::Time(0), timeout);
-      tf_listener_.lookupTransform(this->camera_frame_id_, cloud_msg.header.frame_id, 
+      tf_listener_.lookupTransform(this->camera_frame_id_, cloud_msg.header.frame_id,
 				   ros::Time(0), transform);
     }
     catch (tf::ExtrapolationException& ex) {
@@ -467,8 +502,8 @@ void DepthCloudEncoder::process(const sensor_msgs::ImageConstPtr& depth_msg,
 
         if (*depth_ptr == *depth_ptr) // valid point
         {
-          depth_pix_low = std::min(std::max(0.0f, (*depth_ptr / max_depth_per_tile) * (float)(0xFF * 3)), (float)(0xFF * 3));
-          depth_pix_high = std::min(std::max(0.0f, ((*depth_ptr - max_depth_per_tile) / max_depth_per_tile) * (float)(0xFF) * 3), (float)(0xFF * 3));
+          depth_pix_low = std::min(std::max(0.0f, (*depth_ptr / max_depth_per_tile_) * (float)(0xFF * 3)), (float)(0xFF * 3));
+          depth_pix_high = std::min(std::max(0.0f, ((*depth_ptr - max_depth_per_tile_) / max_depth_per_tile_) * (float)(0xFF) * 3), (float)(0xFF * 3));
         }
         else
         {
@@ -489,7 +524,7 @@ void DepthCloudEncoder::process(const sensor_msgs::ImageConstPtr& depth_msg,
           memset(mask_pix_ptr, 0xFF, pix_size);
         }
 
-	// divide into color channels + saturate for each channel:
+        // divide into color channels + saturate for each channel:
         uint8_t depth_pix_low_r = std::min(std::max(0, depth_pix_low), (0xFF));
         uint8_t depth_pix_low_g = std::min(std::max(0, depth_pix_low-(0xFF)), (0xFF));
         uint8_t depth_pix_low_b = std::min(std::max(0, depth_pix_low-(0xFF*2)), (0xFF));
@@ -635,4 +670,3 @@ void DepthCloudEncoder::depthInterpolation(sensor_msgs::ImageConstPtr depth_msg,
 
 
 }
-
