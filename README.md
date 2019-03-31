@@ -1,3 +1,26 @@
+## depthcloud_encoder (kinetic) - 0.1.0-0
+
+The packages in the `depthcloud_encoder` repository were released into the `kinetic` distro by running `/usr/bin/bloom-release depthcloud_encoder --rosdistro kinetic --track kinetic` on `Sun, 31 Mar 2019 05:29:14 -0000`
+
+The `depthcloud_encoder` package was released.
+
+Version of package(s) in repository `depthcloud_encoder`:
+
+- upstream repository: https://github.com/RobotWebTools/depthcloud_encoder.git
+- release repository: https://github.com/RobotWebTools-release/depthcloud_encoder-release.git
+- rosdistro version: `0.0.5-0`
+- old version: `0.0.5-0`
+- new version: `0.1.0-0`
+
+Versions of tools used:
+
+- bloom version: `0.7.2`
+- catkin_pkg version: `0.4.10`
+- rosdep version: `0.15.1`
+- rosdistro version: `0.7.2`
+- vcstools version: `0.1.40`
+
+
 ## depthcloud_encoder (melodic) - 0.1.0-0
 
 The packages in the `depthcloud_encoder` repository were released into the `melodic` distro by running `/usr/bin/bloom-release depthcloud_encoder --rosdistro melodic --track melodic --new-track` on `Sun, 31 Mar 2019 05:22:47 -0000`
