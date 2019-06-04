@@ -1,4 +1,4 @@
-From c0790e7120f5e66bceff66df718b5ca076b62108 Mon Sep 17 00:00:00 2001
+From 68e704377b1351d7c5d510b9d6c24d64fa86c143 Mon Sep 17 00:00:00 2001
 From: Johannes Meyer <johannes@intermodalics.eu>
 Date: Tue, 4 Jun 2019 10:51:59 +0200
 Subject: [PATCH] Switch to PCL 1.8+
